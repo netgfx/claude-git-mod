@@ -1,0 +1,10 @@
+{
+  "name": "git-mod",
+  "version": "0.1.0",
+  "description": "A /git side panel: changed files with stage buttons, AI commit messages, push, and stashes with AI titles",
+  "author": { "name": "djmid", "email": "djmid71@gmail.com" },
+  "homepage": "https://github.com/netgfx/claude-git-mod",
+  "repository": "https://github.com/netgfx/claude-git-mod",
+  "license": "MIT",
+  "keywords": ["git", "panel", "commit", "stash", "mod"]
+}
