@@ -146,6 +146,29 @@ test('Restore applies the stash and keeps it', async ($, on) => {
   expect(calls.some((c) => c.slice(5).includes('pop') || c.slice(5).includes('drop'))).toBe(false)
 })
 
+test('Remove asks for confirmation, then drops the stash', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'drop-abc1234' })
+  expect(calls.some((c) => c.slice(5).includes('drop'))).toBe(false)
+  await ui.press({ key: 'confirm-drop-abc1234' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'stash drop stash@{0}')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Removed "Tweak login form layout" \(deadbeefca\)/ })).toBeDefined()
+})
+
+test('Keep cancels a pending remove', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'drop-abc1234' })
+  await ui.press({ key: 'keep-abc1234' })
+  expect(await ui.find({ key: 'restore-abc1234' })).toBeDefined()
+  expect(calls.some((c) => c.slice(5).includes('drop'))).toBe(false)
+})
+
 test('Push without upstream sets it on origin', async ($, on) => {
   const calls: string[][] = []
   baseStubs(on, calls, {

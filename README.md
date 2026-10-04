@@ -27,7 +27,7 @@ To update later: `claude plugin marketplace update claude-git-mod`.
 - **Commit (c)**: the model (`haiku`) writes a message from the staged diff and your recent commit style. You can then **Approve & commit (a)**, **Edit (e)**, **Regenerate (g)** or **Cancel (x)**. In edit mode, separate body lines with `|`.
 - **Push (p)**: runs `git push`. If the branch has no upstream yet, it runs `git push -u origin <branch>`.
 - **Stash (s)**: runs `git stash push -u` (untracked files included). The model writes a title of up to 6 words. The panel shows the stash commit hash, with a **Copy hash** button.
-- **Stashes (t)**: a collapsible list. Each stash has a title, ref, hash, age and a **Restore** button. Restore runs `git stash apply`, so the stash stays in the list.
+- **Stashes (t)**: a collapsible list. Each stash has a title, ref, hash, age, and **Restore** and **Remove** buttons. Restore runs `git stash apply`, so the stash stays in the list. **Remove** asks you to confirm (**Confirm remove** / **Keep**), then runs `git stash drop`. The notice shows the dropped stash's hash, with a **Copy hash** button, so you can bring it back with `git stash store -m "<title>" <hash>`.
 
 ### Screenshots
 

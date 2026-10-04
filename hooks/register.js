@@ -33,6 +33,7 @@ let busy = '' // label of the running action, '' when idle
 let notice = null // { tone: 'ok' | 'error' | 'info', text, hash? }
 let draft = null // { subject, body, isEditing }
 let stashesOpen = true
+let confirmDrop = '' // hash of the stash waiting for a second press to remove it
 
 // ---------- git ----------
 
@@ -434,6 +435,24 @@ async function restore($, s) {
   setNotice($, 'ok', 'Restored "' + s.title + '" (the stash is kept).')
 }
 
+async function drop($, s) {
+  confirmDrop = ''
+  const sl = await gitRoot($, ['stash', 'list', '--format=%gd%x1f%h%x1f%gs%x1f%cr%x1e'])
+  const current = parseStashes(sl.out).find((x) => x.hash === s.hash)
+  if (!current) {
+    setNotice($, 'error', 'That stash no longer exists.')
+    return
+  }
+  // Keep the full hash: `git stash store -m <title> <hash>` brings a dropped stash back
+  const hash = (await gitRoot($, ['rev-parse', current.ref])).out.trim()
+  const r = await gitRoot($, ['stash', 'drop', current.ref])
+  if (!r.ok) {
+    setNotice($, 'error', 'Remove of "' + s.title + '" failed:\n' + lastLines(r.err || r.out, 6))
+    return
+  }
+  setNotice($, 'ok', 'Removed "' + s.title + '" (' + hash.slice(0, 10) + '). To undo: git stash store ' + hash.slice(0, 10), hash)
+}
+
 // ---------- drawing helpers (no $) ----------
 
 function splitPath(p) {
@@ -802,7 +821,15 @@ export function register(on) {
                 columnGap: 1,
                 children: [
                   Box({ flexShrink: 1, flexGrow: 1, children: [Text({ bold: true, color: 'magenta', wrap: 'wrap', children: [s.title || '(no title)'] })] }),
-                  Button({ key: 'restore-' + s.hash, label: 'Restore', onPress: () => runAction($, 'Restoring stash', () => restore($, s)) }),
+                  ...(confirmDrop === s.hash
+                    ? [
+                        Button({ key: 'confirm-drop-' + s.hash, label: 'Confirm remove', onPress: () => runAction($, 'Removing stash', () => drop($, s)) }),
+                        Button({ key: 'keep-' + s.hash, label: 'Keep', dimColor: true, onPress: () => { confirmDrop = ''; redraw() } }),
+                      ]
+                    : [
+                        Button({ key: 'restore-' + s.hash, label: 'Restore', onPress: () => runAction($, 'Restoring stash', () => restore($, s)) }),
+                        Button({ key: 'drop-' + s.hash, label: 'Remove', dimColor: true, onPress: () => { confirmDrop = s.hash; redraw() } }),
+                      ]),
                 ],
               }),
               ...(narrow
