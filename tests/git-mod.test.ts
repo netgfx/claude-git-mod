@@ -181,6 +181,33 @@ test('Push without upstream sets it on origin', async ($, on) => {
   expect(calls.some((c) => c.slice(5).join(' ') === 'push -u origin fix/crash')).toBe(true)
 })
 
+test('Pull fast-forwards from the upstream', async ($, on) => {
+  const calls: string[][] = []
+  let head = 'aaaa'
+  baseStubs(on, calls, {
+    'rev-parse': (args: string[]) => ({ value: { exitCode: 0, stdout: args[1] === '--show-toplevel' ? 'C:/work\n' : head + '\n', stderr: '' } }),
+    pull: () => { head = 'bbbb'; return { value: { exitCode: 0, stdout: '', stderr: '' } } },
+    'rev-list': () => ({ value: { exitCode: 0, stdout: '3\n', stderr: '' } }),
+  })
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'pull' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'pull --ff-only')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Pulled 3 commits from origin\/feature\/login-form/ })).toBeDefined()
+})
+
+test('Pull without upstream does not run git pull', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls, {
+    status: () => ({ value: { exitCode: 0, stdout: '# branch.oid 1\0# branch.head fix/crash\0', stderr: '' } }),
+  })
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'pull' })
+  expect(calls.some((c) => c.slice(5)[0] === 'pull')).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /has no upstream yet/ })).toBeDefined()
+})
+
 test('outside a repository the panel says so', async ($, on) => {
   const calls: string[][] = []
   baseStubs(on, calls, {

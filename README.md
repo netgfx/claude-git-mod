@@ -25,6 +25,7 @@ To update later: `claude plugin marketplace update claude-git-mod`.
 - **Branch header**: shows the current branch. For a branch with a group, like `feature/login-form`, it also shows the group tag and the branch it came from (`↳ from develop`). Shows ahead/behind (`↑2 ↓0`) against the upstream.
 - **Staged / Changes lists**: `+` added (green), `~` modified (yellow), `-` deleted (red), `→` renamed (cyan), `!` conflict (magenta). Each file has a **Stage** or **Unstage** button. There are also **Stage all** and **Unstage all** buttons.
 - **Commit (c)**: the model (`haiku`) writes a message from the staged diff and your recent commit style. You can then **Approve & commit (a)**, **Edit (e)**, **Regenerate (g)** or **Cancel (x)**. In edit mode, separate body lines with `|`.
+- **Pull (l)**: runs `git pull --ff-only` from the upstream and says how many commits came in. It never creates a merge commit or rebases; if the branches have diverged it stops and tells you, so you can choose `git pull --rebase` or `--no-rebase` yourself. Shows `↓N` when the branch is behind.
 - **Push (p)**: runs `git push`. If the branch has no upstream yet, it runs `git push -u origin <branch>`.
 - **Stash (s)**: runs `git stash push -u` (untracked files included). The model writes a title of up to 6 words. The panel shows the stash commit hash, with a **Copy hash** button.
 - **Stashes (t)**: a collapsible list. Each stash has a title, ref, hash, age, and **Restore** and **Remove** buttons. Restore runs `git stash apply`, so the stash stays in the list. **Remove** asks you to confirm (**Confirm remove** / **Keep**), then runs `git stash drop`. The notice shows the dropped stash's hash, with a **Copy hash** button, so you can bring it back with `git stash store -m "<title>" <hash>`.
@@ -52,6 +53,7 @@ Push result:
 | `e` | Edit the message |
 | `g` | Regenerate the message |
 | `x` | Cancel |
+| `l` | Pull (fast-forward only) |
 | `p` | Push |
 | `s` | Stash (including untracked files) |
 | `t` | Show / hide the stash list |
@@ -86,7 +88,7 @@ To load it in the Desktop app, add the folder to `env.CLAUDE_CODE_PLUGIN_DIRS` i
 
 ## Notes
 - Mods run git with repository hooks turned off, so `pre-commit` and `commit-msg` hooks do **not** run on commits made from the panel.
-- Push runs with `GIT_TERMINAL_PROMPT=0`. If git needs credentials, the push fails right away with a message instead of hanging. A credential manager or SSH agent still works.
+- Pull and push run with `GIT_TERMINAL_PROMPT=0`. If git needs credentials, they fail right away with a message instead of hanging. A credential manager or SSH agent still works.
 - `$` calls this mod makes: `$.process.run` (git only), `$.model.complete`, `$.ui.*`, `$.clock.every`, `$.command.register`.
 
 ## Repository layout

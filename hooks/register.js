@@ -1,6 +1,6 @@
 // git-mod: a /git side panel for the repository in the session's directory.
 // Shows the branch (and the branch it came from), changed files with
-// Stage / Unstage buttons, AI-written commit messages, push, and stashes with
+// Stage / Unstage buttons, AI-written commit messages, pull, push, and stashes with
 // AI-written titles. Everything runs through `git` (a real executable on both
 // Windows and macOS, so no shell or platform branch is needed).
 // Helpers that take $ are top-level functions: static analysis refuses $
@@ -360,6 +360,35 @@ async function push($) {
   setNotice($, 'ok', 'Pushed ' + repo.branch + ' → ' + target)
 }
 
+// Fast-forward only: never creates a merge commit or rewrites local commits
+async function pull($) {
+  if (repo.isDetached) {
+    setNotice($, 'error', 'HEAD is detached. Check out a branch before pulling.')
+    return
+  }
+  if (!repo.upstream) {
+    setNotice($, 'error', repo.branch + ' has no upstream yet. Push it first, or run: git branch -u origin/' + repo.branch)
+    return
+  }
+  const before = (await gitRoot($, ['rev-parse', 'HEAD'])).out.trim()
+  const r = await gitRoot($, ['pull', '--ff-only'], { timeoutMs: 180000 })
+  if (!r.ok) {
+    const text = r.err || r.out
+    const hint = /not possible to fast-forward|diverg/i.test(text)
+      ? '\nThe branches have diverged. Run git pull --rebase or git pull --no-rebase yourself.'
+      : ''
+    setNotice($, 'error', 'Pull failed:\n' + lastLines(text, 6) + hint)
+    return
+  }
+  const after = (await gitRoot($, ['rev-parse', 'HEAD'])).out.trim()
+  if (before === after) {
+    setNotice($, 'ok', repo.branch + ' is already up to date with ' + repo.upstream)
+    return
+  }
+  const count = Number((await gitRoot($, ['rev-list', '--count', before + '..' + after])).out.trim()) || 0
+  setNotice($, 'ok', 'Pulled ' + count + ' commit' + (count === 1 ? '' : 's') + ' from ' + repo.upstream + ' into ' + repo.branch)
+}
+
 export function cleanTitle(text) {
   const words = String(text ?? '')
     .split('\n')
@@ -463,7 +492,7 @@ function splitPath(p) {
 export function register(on) {
   on('session.start', async ($, e, next) => {
     try {
-      await $.command.register({ name: 'git', description: 'Open the git panel (changes, commit, push, stashes)', immediate: true })
+      await $.command.register({ name: 'git', description: 'Open the git panel (changes, commit, pull, push, stashes)', immediate: true })
     } catch (err) {
       $.ui.log('git-mod: could not register /git: ' + err.message, { to: 'debug' })
     }
@@ -605,10 +634,18 @@ export function register(on) {
             },
           }),
           Button({
+            key: 'pull',
+            label: 'Pull (l)' + (repo.behind ? ' ↓' + repo.behind : ''),
+            hotkey: 'l',
+            dimColor: !repo.upstream,
+            ...(repo.behind && !staged.length && !draft ? { variant: 'primary' } : {}),
+            onPress: () => runAction($, 'Pulling', () => pull($)),
+          }),
+          Button({
             key: 'push',
             label: 'Push (p)' + (repo.ahead ? ' ↑' + repo.ahead : ''),
             hotkey: 'p',
-            ...(repo.ahead && !staged.length && !draft ? { variant: 'primary' } : {}),
+            ...(repo.ahead && !repo.behind && !staged.length && !draft ? { variant: 'primary' } : {}),
             onPress: () => runAction($, 'Pushing', () => push($)),
           }),
           Button({ key: 'refresh', label: 'r', hotkey: 'r', plain: true, dimColor: true, onPress: () => runAction($, 'Refreshing', async () => {}) }),
