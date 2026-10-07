@@ -648,7 +648,7 @@ export function register(on) {
             ...(repo.ahead && !repo.behind && !staged.length && !draft ? { variant: 'primary' } : {}),
             onPress: () => runAction($, 'Pushing', () => push($)),
           }),
-          Button({ key: 'refresh', label: 'r', hotkey: 'r', plain: true, dimColor: true, onPress: () => runAction($, 'Refreshing', async () => {}) }),
+          Button({ key: 'refresh', label: 'Refresh (r)', hotkey: 'r', onPress: () => runAction($, 'Refreshing', async () => {}) }),
         ],
       }),
     )
