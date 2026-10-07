@@ -185,7 +185,7 @@ async function refresh($) {
       stashes = []
     } else {
       const root = top.out.trim()
-      const st = await git($, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], { cwd: root })
+      const st = await git($, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal'], { cwd: root })
       const { info, list } = parseStatus(st.out)
       repo = {
         root,
