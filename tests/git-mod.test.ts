@@ -97,6 +97,17 @@ test('main shows no parent line', async ($, on) => {
   expect(calls.some((c) => c.includes('reflog'))).toBe(false)
 })
 
+test('refresh uses normal untracked mode in git status', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  const statusCall = calls.find((c) => c.slice(5)[0] === 'status')
+  expect(statusCall).toBeDefined()
+  expect(statusCall!.slice(5)).toContain('--untracked-files=normal')
+  expect(statusCall!.slice(5)).not.toContain('--untracked-files=all')
+})
+
 test('Stage runs git add for that file', async ($, on) => {
   const calls: string[][] = []
   baseStubs(on, calls)
