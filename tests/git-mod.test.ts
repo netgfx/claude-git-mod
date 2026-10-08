@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { parseStatus, parseStashes, parseMessage, cleanTitle, firstChangedLine, editorFor, editorUrl } from '../hooks/register.js'
+import { parseStatus, parseStashes, parseMessage, cleanTitle, firstChangedLine, editorFor, editorUrl, discardCommands } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'git-mod',
@@ -201,6 +201,54 @@ test('a deleted file is not opened', async ($, on) => {
   await ui.press({ key: 'uopen-old.txt' })
   expect(starts.length).toBe(0)
   expect(await ui.find({ type: 'Text', text: /old\.txt is deleted/ })).toBeDefined()
+})
+
+test('discard picks the git commands for each kind of file', async () => {
+  const file = (x: string, y: string, extra: any = {}) => ({ path: 'src/a.ts', orig: '', x, y, isUntracked: false, isConflict: false, ...extra })
+  expect(discardCommands(file('.', '?', { isUntracked: true, path: 'new/' }), false, false)).toEqual([['clean', '-f', '-d', '-q', '--', 'new/']])
+  expect(discardCommands(file('.', 'M'), false, false)).toEqual([['restore', '--worktree', '--', 'src/a.ts']])
+  expect(discardCommands(file('.', 'D'), false, false)).toEqual([['restore', '--worktree', '--', 'src/a.ts']])
+  expect(discardCommands(file('M', 'M'), true, false)).toEqual([['restore', '--staged', '--worktree', '--source=HEAD', '--', 'src/a.ts']])
+  expect(discardCommands(file('A', '.'), true, false)).toEqual([['rm', '-f', '-r', '-q', '--', 'src/a.ts']])
+  expect(discardCommands(file('M', '.'), true, true)).toEqual([['rm', '-f', '-r', '-q', '--', 'src/a.ts']])
+  expect(discardCommands(file('R', '.', { path: 'docs/new.md', orig: 'docs/old.md' }), true, false)).toEqual([
+    ['rm', '-f', '-r', '-q', '--', 'docs/new.md'],
+    ['restore', '--staged', '--worktree', '--source=HEAD', '--', 'docs/old.md'],
+  ])
+})
+
+test('Discard asks for confirmation, then deletes a new file', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'discard-u-notes/todo.md' })
+  expect(calls.some((c) => c.slice(5)[0] === 'clean')).toBe(false)
+  await ui.press({ key: 'confirm-discard-u-notes/todo.md' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'clean -f -d -q -- notes/todo.md')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Deleted notes\/todo\.md/ })).toBeDefined()
+})
+
+test('Discard on a staged file resets it to HEAD', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'discard-s-src/app.ts' })
+  await ui.press({ key: 'confirm-discard-s-src/app.ts' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'restore --staged --worktree --source=HEAD -- src/app.ts')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Discarded the changes to src\/app\.ts/ })).toBeDefined()
+})
+
+test('Keep cancels a pending discard', async ($, on) => {
+  const calls: string[][] = []
+  baseStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'discard-u-notes/todo.md' })
+  await ui.press({ key: 'keep-u-notes/todo.md' })
+  expect(await ui.find({ key: 'discard-u-notes/todo.md' })).toBeDefined()
+  expect(calls.some((c) => ['clean', 'restore', 'rm'].includes(c.slice(5)[0]))).toBe(false)
 })
 
 test('Commit drafts a message with the model, Approve commits it', async ($, on) => {

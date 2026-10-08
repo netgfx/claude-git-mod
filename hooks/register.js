@@ -61,6 +61,7 @@ let notice = null // { tone: 'ok' | 'error' | 'info', text, hash? }
 let draft = null // { subject, body, isEditing }
 let stashesOpen = true
 let confirmDrop = '' // hash of the stash waiting for a second press to remove it
+let confirmDiscard = '' // key of the file row waiting for a second press to discard it
 let platform = '' // 'windows' | 'mac' | 'linux'
 const openers = new Map() // extension -> the default app's path or id ('' when none)
 let lastPress = { key: '', at: 0, opened: false } // the last press on a file name
@@ -301,6 +302,37 @@ async function stageAll($) {
 async function unstageAll($) {
   const r = repo.isUnborn ? await gitRoot($, ['rm', '--cached', '-r', '-q', '.']) : await gitRoot($, ['reset', '-q'])
   if (!r.ok) setNotice($, 'error', 'Could not unstage all:\n' + lastLines(r.err, 4))
+}
+
+// The git commands that throw away a file's changes. In the Changes list: its
+// unstaged edits (back to the staged copy), or the file itself when it's new.
+// In the Staged list: staged and unstaged edits (back to HEAD), or the file
+// itself when the commit would add it.
+export function discardCommands(f, isStagedList, isUnborn) {
+  if (!isStagedList) {
+    if (f.isUntracked) return [['clean', '-f', '-d', '-q', '--', f.path]]
+    return [['restore', '--worktree', '--', f.path]]
+  }
+  if (isUnborn || f.x === 'A' || f.x === 'C') return [['rm', '-f', '-r', '-q', '--', f.path]]
+  if (f.x === 'R') return [['rm', '-f', '-r', '-q', '--', f.path], ['restore', '--staged', '--worktree', '--source=HEAD', '--', f.orig]]
+  return [['restore', '--staged', '--worktree', '--source=HEAD', '--', f.path]]
+}
+
+async function discardFile($, f, isStagedList) {
+  confirmDiscard = ''
+  if (f.isConflict) {
+    setNotice($, 'info', f.path + ' has a merge conflict. Resolve it, or abort the merge, instead of discarding.')
+    return
+  }
+  const isNew = isStagedList ? repo.isUnborn || f.x === 'A' || f.x === 'C' : f.isUntracked
+  for (const args of discardCommands(f, isStagedList, repo.isUnborn)) {
+    const r = await gitRoot($, args)
+    if (!r.ok) {
+      setNotice($, 'error', 'Could not discard ' + f.path + ':\n' + lastLines(r.err || r.out, 4))
+      return
+    }
+  }
+  setNotice($, 'ok', (isNew ? 'Deleted ' : 'Discarded the changes to ') + f.path)
 }
 
 export function parseMessage(text) {
@@ -933,11 +965,14 @@ export function register(on) {
     const fileRow = (f, isStagedList) => {
       const code = isStagedList ? f.x : f.isUntracked ? '?' : f.isConflict ? 'U' : f.y
       const kind = KIND[kindOf(code)]
-      const [dir, base] = splitPath(f.path)
+      // An untracked folder comes as `dir/`: show its last part as the name
+      const [dir, base] = splitPath(f.path.replace(/\/$/, ''))
       const shown = f.orig && isStagedList ? splitPath(f.orig)[1] + ' → ' : ''
       const openKey = (isStagedList ? 'sopen-' : 'uopen-') + f.path
-      const room = Math.max(8, cols - 16)
-      const name = shown + base
+      const rowKey = (isStagedList ? 's-' : 'u-') + f.path
+      const isConfirming = confirmDiscard === rowKey
+      const room = Math.max(8, cols - (isConfirming ? 30 : 26))
+      const name = shown + base + (f.path.endsWith('/') ? '/' : '')
       return Box({
         key: (isStagedList ? 'srow-' : 'urow-') + f.path,
         flexDirection: 'row',
@@ -966,9 +1001,17 @@ export function register(on) {
               }),
             ],
           }),
-          isStagedList
-            ? Button({ key: 'unstage-' + f.path, label: 'Unstage', dimColor: true, onPress: () => runAction($, 'Unstaging', () => unstageFile($, f)) })
-            : Button({ key: 'stage-' + f.path, label: 'Stage', onPress: () => runAction($, 'Staging', () => stageFile($, f)) }),
+          ...(isConfirming
+            ? [
+                Button({ key: 'confirm-discard-' + rowKey, label: 'Confirm discard', onPress: () => runAction($, 'Discarding', () => discardFile($, f, isStagedList)) }),
+                Button({ key: 'keep-' + rowKey, label: 'Keep', dimColor: true, onPress: () => { confirmDiscard = ''; redraw() } }),
+              ]
+            : [
+                Button({ key: 'discard-' + rowKey, label: 'Discard', dimColor: true, onPress: () => { confirmDiscard = rowKey; redraw() } }),
+                isStagedList
+                  ? Button({ key: 'unstage-' + f.path, label: 'Unstage', dimColor: true, onPress: () => runAction($, 'Unstaging', () => unstageFile($, f)) })
+                  : Button({ key: 'stage-' + f.path, label: 'Stage', onPress: () => runAction($, 'Staging', () => stageFile($, f)) }),
+              ]),
         ],
       })
     }

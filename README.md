@@ -24,6 +24,7 @@ To update later: `claude plugin marketplace update claude-git-mod`.
 
 - **Branch header**: shows the current branch. For a branch with a group, like `feature/login-form`, it also shows the group tag and the branch it came from (`↳ from develop`). Shows ahead/behind (`↑2 ↓0`) against the upstream.
 - **Staged / Changes lists**: `+` added (green), `~` modified (yellow), `-` deleted (red), `→` renamed (cyan), `!` conflict (magenta). Each file has a **Stage** or **Unstage** button. There are also **Stage all** and **Unstage all** buttons.
+- **Discard (per file)**: throws away a file's changes. Press **Discard**, then **Confirm discard** (or **Keep** to back out); nothing can bring the changes back. In **Changes** it resets the file to its staged copy (`git restore --worktree`), or deletes it if it's new and untracked (`git clean`). In **Staged** it resets both staged and unstaged edits to the last commit (`git restore --staged --worktree --source=HEAD`), or deletes the file if the commit would add it (`git rm -f`). A staged rename is undone: the new name is removed and the old file comes back. Files with a merge conflict can't be discarded.
 - **Open a file**: double-click a file name in either list, or move to it with Tab / the arrows and press Enter. The file opens in the app your system uses for that file type (Windows: its file association; macOS: Launch Services; Linux: `xdg-mime`). If that app is VS Code (or VS Code Insiders, VSCodium, Cursor, Windsurf), Sublime Text or Notepad++, the file opens at its first changed line: the first hunk of `git diff` for the Changes list, `git diff --cached` for the Staged list. Deleted files can't be opened. A single click does nothing, so a click by mistake doesn't open anything.
 - **Commit (c)**: the model (`haiku`) writes a message from the staged diff and your recent commit style. You can then **Approve & commit (a)**, **Edit (e)**, **Regenerate (g)** or **Cancel (x)**. In edit mode, separate body lines with `|`.
 - **Pull (l)**: runs `git pull --ff-only` from the upstream and says how many commits came in. It never creates a merge commit or rebases; if the branches have diverged it stops and tells you, so you can choose `git pull --rebase` or `--no-rebase` yourself. Shows `↓N` when the branch is behind.
@@ -112,6 +113,16 @@ claude plugin validate .
 claude plugin test
 ```
 `claude plugin validate .` checks both `plugin.json` and `marketplace.json`. When you release, bump `version` in both files.
+
+## Changes
+
+- **0.5.0**: **Discard** a file from either list, with a confirm step: reset its changes, or delete it if it's new. Untracked folders show their name.
+- **0.4.0**: Open a changed file by double-clicking it, or by pressing Enter on it. It opens in the system's default app for that file type. VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf, Sublime Text and Notepad++ open it at the first changed line. File rows now show the name first and the folder after it.
+- **0.3.2**: The refresh button now reads **Refresh (r)** instead of a bare `r`.
+- **0.3.1**: Fix a blank panel in some repositories: the refresh now runs `git status` with `--untracked-files=normal`.
+- **0.3.0**: **Pull (l)**, fast-forward only.
+- **0.2.0**: Remove a stash, with a confirm step and a **Copy hash** button for undo.
+- **0.1.0**: First release: branch header, Stage / Unstage, AI-written commit messages, push, stashes.
 
 ## License
 MIT. See [LICENSE](LICENSE).
