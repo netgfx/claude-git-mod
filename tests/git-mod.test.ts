@@ -1,5 +1,5 @@
-import { expect, test } from 'claude-code/testing'
-import { parseStatus, parseStashes, parseMessage, cleanTitle } from '../hooks/register.js'
+import { expect, mock, test } from 'claude-code/testing'
+import { parseStatus, parseStashes, parseMessage, cleanTitle, firstChangedLine, editorFor, editorUrl } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'git-mod',
@@ -34,6 +34,7 @@ function fakeGit(calls: string[][], overrides: Record<string, any> = {}) {
     const args = argv.slice(5) // drop: git -c core.quotepath=false -c color.ui=false
     const sub = args[0]
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
+    if (argv[0] !== 'git') return overrides.exec ? overrides.exec(argv, e) : ok('')
     if (overrides[sub]) return overrides[sub](args, e)
     if (sub === 'rev-parse' && args[1] === '--show-toplevel') return ok('C:/work\n')
     if (sub === 'rev-parse') return ok('deadbeefcafe1234\n')
@@ -115,6 +116,91 @@ test('Stage runs git add for that file', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
   await ui.press({ key: 'stage-notes/todo.md' })
   expect(calls.some((c) => c.slice(5).join(' ') === 'add -A -- notes/todo.md')).toBe(true)
+})
+
+test('helpers find the first changed line and the editor', async () => {
+  expect(firstChangedLine('diff --git a/x b/x\n@@ -10,2 +12,3 @@ fn\n-a\n+b\n@@ -40 +44 @@\n')).toBe(12)
+  expect(firstChangedLine('@@ -3 +2,0 @@\n-gone\n')).toBe(2)
+  expect(firstChangedLine('@@ -0,0 +0,0 @@\n')).toBe(1)
+  expect(firstChangedLine('')).toBe(1)
+  expect(editorFor('C:\\Program Files\\Microsoft VS Code\\Code.exe')?.scheme).toBe('vscode')
+  expect(editorFor('/Applications/Visual Studio Code.app')?.scheme).toBe('vscode')
+  expect(editorFor('/Applications/Visual Studio Code - Insiders.app')?.scheme).toBe('vscode-insiders')
+  expect(editorFor('code.desktop')?.scheme).toBe('vscode')
+  expect(editorFor('/Applications/Cursor.app')?.scheme).toBe('cursor')
+  expect(editorFor('C:\\Program Files\\Notepad++\\notepad++.exe')?.name).toBe('Notepad++')
+  expect(editorFor('C:\\Windows\\Notepad\\Notepad.exe')).toBe(null)
+  expect(editorFor('/Applications/Preview.app')).toBe(null)
+  expect(editorFor('')).toBe(null)
+  expect(editorUrl('vscode', 'C:\\work\\docs\\new name.md', 7)).toBe('vscode://file/C:/work/docs/new%20name.md:7:1')
+  expect(editorUrl('vscode', '/Users/me/a#b.ts', 3)).toBe('vscode://file/Users/me/a%23b.ts:3:1')
+})
+
+// Records what the open helpers started; the default app comes from `app`
+function openStubs(on: any, calls: string[][], starts: any[], app: string, diff = '@@ -10,2 +12,3 @@\n') {
+  baseStubs(on, calls, {
+    diff: () => ({ value: { exitCode: 0, stdout: diff, stderr: '' } }),
+    exec: (argv: string[], e: any) => {
+      if (argv[argv.length - 1].includes('AssocQueryString')) return { value: { exitCode: 0, stdout: app + '\r\n', stderr: '' } }
+      starts.push(e.init.env)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    },
+  })
+}
+
+test('a single click on a file name does not open it', async ($, on) => {
+  const calls: string[][] = []
+  const starts: any[] = []
+  openStubs(on, calls, starts, 'C:\\Program Files\\Microsoft VS Code\\Code.exe')
+  mock.clock(on)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'sopen-src/app.ts' })
+  expect(starts.length).toBe(0)
+})
+
+test('double-click opens a modified file in VS Code at its first change', async ($, on) => {
+  const calls: string[][] = []
+  const starts: any[] = []
+  openStubs(on, calls, starts, 'C:\\Program Files\\Microsoft VS Code\\Code.exe')
+  mock.clock(on)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'sopen-src/app.ts' })
+  await ui.press({ key: 'sopen-src/app.ts' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'diff --cached --no-ext-diff -U0 -- src/app.ts')).toBe(true)
+  expect(starts.length).toBe(1)
+  expect(starts[0].GITMOD_TARGET).toBe('vscode://file/C:/work/src/app.ts:12:1')
+})
+
+test('Enter on the focused file name opens it once, with the default app', async ($, on) => {
+  const calls: string[][] = []
+  const starts: any[] = []
+  openStubs(on, calls, starts, 'C:\\Windows\\Notepad\\Notepad.exe')
+  on('ui.focus', () => ({ value: {} }))
+  const clock = mock.clock(on)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  // The person moves the ring onto the name (the engine's ui.focus event)
+  await $.ui.focus({ component: 'Pane', requestId: 'git-mod', key: 'uopen-notes/todo.md', element: 'uopen-notes/todo.md', origin: { kind: 'person' } } as any)
+  await clock.advance(1000)
+  await ui.press({ key: 'uopen-notes/todo.md' })
+  expect(starts.length).toBe(1)
+  expect(starts[0].GITMOD_TARGET).toBe('C:\\work\\notes\\todo.md')
+  expect(calls.some((c) => c.slice(5)[0] === 'diff')).toBe(false)
+})
+
+test('a deleted file is not opened', async ($, on) => {
+  const calls: string[][] = []
+  const starts: any[] = []
+  openStubs(on, calls, starts, 'C:\\Program Files\\Microsoft VS Code\\Code.exe')
+  mock.clock(on)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'uopen-old.txt' })
+  await ui.press({ key: 'uopen-old.txt' })
+  expect(starts.length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /old\.txt is deleted/ })).toBeDefined()
 })
 
 test('Commit drafts a message with the model, Approve commits it', async ($, on) => {

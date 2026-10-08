@@ -11,6 +11,33 @@ const MODEL = 'haiku' // model for commit messages and stash titles
 const POLL_MS = 3000 // refresh interval while the panel is open
 const BASE_BRANCHES = ['develop', 'dev', 'development', 'main', 'master']
 const WATCHED_TOOLS = ['Bash', 'PowerShell', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+const DOUBLE_PRESS_MS = 500 // two presses on one file within this open it
+const FOCUS_SETTLE_MS = 250 // a click moves the focus just before its press
+
+// Editors that can open a file at a line. `scheme` opens `<scheme>://file/<path>:<line>:1`;
+// `args` builds the arguments for the editor's own executable.
+const EDITORS = [
+  { name: 'VS Code Insiders', match: /code - insiders|code-insiders/i, scheme: 'vscode-insiders' },
+  { name: 'VSCodium', match: /vscodium|(^|[\\/])codium(\.exe|\.desktop)?$/i, scheme: 'vscodium' },
+  { name: 'Cursor', match: /(^|[\\/])cursor(\.exe|\.app|\.desktop)?$/i, scheme: 'cursor' },
+  { name: 'Windsurf', match: /(^|[\\/])windsurf(\.exe|\.app|\.desktop)?$/i, scheme: 'windsurf' },
+  { name: 'VS Code', match: /visual studio code|(^|[\\/])code(\.exe|\.desktop)?$/i, scheme: 'vscode' },
+  { name: 'Sublime Text', match: /sublime/i, args: (file, line) => [file + ':' + line] },
+  { name: 'Notepad++', match: /notepad\+\+/i, args: (file, line) => ['-n' + line, file] },
+]
+
+// Windows: the program the shell runs for an extension (AssocQueryString, ASSOCSTR_EXECUTABLE)
+const PS_ASSOC =
+  '$t=Add-Type -MemberDefinition \'[DllImport("Shlwapi.dll",CharSet=CharSet.Unicode)] public static extern uint AssocQueryString(int f,int s,string a,string x,System.Text.StringBuilder o,ref uint n);\' -Name Assoc -Namespace GitMod -PassThru; ' +
+  '$n=[uint32]1024; $sb=New-Object System.Text.StringBuilder 1024; ' +
+  'if($t::AssocQueryString(0,2,$env:GITMOD_EXT,[NullString]::Value,$sb,[ref]$n) -eq 0){$sb.ToString()}'
+// Windows: open a file or URL as Explorer would, or start a program with arguments, without waiting
+const PS_START =
+  '$i=New-Object System.Diagnostics.ProcessStartInfo; $i.FileName=$env:GITMOD_TARGET; $i.Arguments=$env:GITMOD_ARGS; $i.UseShellExecute=$true; ' +
+  'try { [void][System.Diagnostics.Process]::Start($i) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }'
+// macOS: the app that opens a file
+const JXA_APP =
+  "function run(argv){ObjC.import('AppKit');var a=$.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.fileURLWithPath(argv[0]));return a.isNil()?'':ObjC.unwrap(a.path)}"
 
 const KIND = {
   added: { glyph: '+', color: 'green', label: 'added' },
@@ -34,6 +61,10 @@ let notice = null // { tone: 'ok' | 'error' | 'info', text, hash? }
 let draft = null // { subject, body, isEditing }
 let stashesOpen = true
 let confirmDrop = '' // hash of the stash waiting for a second press to remove it
+let platform = '' // 'windows' | 'mac' | 'linux'
+const openers = new Map() // extension -> the default app's path or id ('' when none)
+let lastPress = { key: '', at: 0, opened: false } // the last press on a file name
+let focused = { key: '', at: 0 } // the pane element holding the focus ring
 
 // ---------- git ----------
 
@@ -482,6 +513,133 @@ async function drop($, s) {
   setNotice($, 'ok', 'Removed "' + s.title + '" (' + hash.slice(0, 10) + '). To undo: git stash store ' + hash.slice(0, 10), hash)
 }
 
+// ---------- open a file ----------
+
+// The new-side line of the first hunk in `git diff -U0` output; 1 when there is none
+export function firstChangedLine(diff) {
+  const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/m.exec(String(diff ?? ''))
+  return m ? Math.max(1, Number(m[1])) : 1
+}
+
+// The editor that can jump to a line, from the default app's path or id
+export function editorFor(app) {
+  const name = String(app ?? '').replace(/[\\/]+$/, '')
+  return name ? EDITORS.find((ed) => ed.match.test(name)) ?? null : null
+}
+
+// `<scheme>://file/<path>:<line>:1`, each path segment encoded (the drive's colon kept)
+export function editorUrl(scheme, absPath, line) {
+  const path = absPath.replace(/\\/g, '/')
+  const encoded = path
+    .split('/')
+    .map((seg, i) => (i === 0 && /^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg)))
+    .join('/')
+  return scheme + '://file' + (encoded.startsWith('/') ? '' : '/') + encoded + ':' + line + ':1'
+}
+
+async function run($, argv, init) {
+  try {
+    const r = await $.process.run(argv, { timeoutMs: 15000, ...(init ?? {}) })
+    return { ok: r.exitCode === 0, out: String(r.stdout ?? '').trim(), err: String(r.stderr ?? '').trim() }
+  } catch (err) {
+    return { ok: false, out: '', err: String(err?.message ?? err) }
+  }
+}
+
+async function detectPlatform($) {
+  if (platform) return platform
+  if (/^[A-Za-z]:[\\/]/.test(repo?.root ?? '')) platform = 'windows'
+  else platform = (await run($, ['uname', '-s'])).out === 'Darwin' ? 'mac' : 'linux'
+  return platform
+}
+
+// The app the OS opens this file with: a path (Windows, macOS) or a .desktop id (Linux)
+async function defaultApp($, os, absPath) {
+  const ext = /(\.[^./\\]+)$/.exec(absPath)?.[1]?.toLowerCase() ?? ''
+  if (!ext) return ''
+  if (openers.has(ext)) return openers.get(ext)
+  let app = ''
+  if (os === 'windows') {
+    app = (await run($, ['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_ASSOC], { env: { GITMOD_EXT: ext } })).out
+  } else if (os === 'mac') {
+    app = (await run($, ['osascript', '-l', 'JavaScript', '-e', JXA_APP, absPath])).out
+  } else {
+    const mime = (await run($, ['xdg-mime', 'query', 'filetype', absPath])).out
+    if (mime) app = (await run($, ['xdg-mime', 'query', 'default', mime])).out
+  }
+  openers.set(ext, app)
+  return app
+}
+
+// Opens a file or URL with the OS's default handler
+async function osOpen($, os, target) {
+  if (os === 'windows') {
+    return run($, ['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_START], { env: { GITMOD_TARGET: target, GITMOD_ARGS: '' } })
+  }
+  return run($, [os === 'mac' ? 'open' : 'xdg-open', target])
+}
+
+// Starts an editor's own executable with arguments, without waiting for it to exit
+async function startEditor($, os, app, args) {
+  if (os === 'windows') {
+    const line = args.map((a) => (/[\s"]/.test(a) ? '"' + a.replace(/"/g, '') + '"' : a)).join(' ')
+    return run($, ['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_START], { env: { GITMOD_TARGET: app, GITMOD_ARGS: line } })
+  }
+  if (os === 'mac') {
+    // Sublime Text's command-line tool sits inside the app bundle
+    if (/sublime/i.test(app)) return run($, [app.replace(/\/+$/, '') + '/Contents/SharedSupport/bin/subl', ...args])
+    return { ok: false, out: '', err: '' }
+  }
+  return run($, [/sublime/i.test(app) ? 'subl' : app.replace(/\.desktop$/, ''), ...args])
+}
+
+// Opens a changed file with the machine's default app; an editor that can jump
+// to a line opens it at the first change.
+async function openFile($, f, isStagedList) {
+  // Not in the working tree: deleted there, or a staged delete
+  if (f.y === 'D' || (f.x === 'D' && f.y === '.')) {
+    setNotice($, 'info', f.path + ' is deleted, so there is nothing to open.')
+    return
+  }
+  const os = await detectPlatform($)
+  const absPath = os === 'windows' ? (repo.root + '/' + f.path).replace(/\//g, '\\') : repo.root + '/' + f.path
+  const app = await defaultApp($, os, absPath)
+  const editor = editorFor(app)
+  if (editor) {
+    const diff = f.isUntracked
+      ? { out: '' }
+      : await gitRoot($, ['diff', ...(isStagedList ? ['--cached'] : []), '--no-ext-diff', '-U0', '--', f.path])
+    const line = firstChangedLine(diff.out)
+    const r = editor.scheme
+      ? await osOpen($, os, editorUrl(editor.scheme, absPath, line))
+      : await startEditor($, os, app, editor.args(absPath, line))
+    if (r.ok) {
+      $.ui.toast('Opened ' + f.path + ':' + line + ' in ' + editor.name)
+      return
+    }
+  }
+  const r = await osOpen($, os, absPath)
+  if (!r.ok) setNotice($, 'error', 'Could not open ' + f.path + (r.err ? ':\n' + lastLines(r.err, 4) : '.'))
+}
+
+// A double click, or Enter on the focused name, opens the file. A single click
+// only moves the focus; the click that follows it within DOUBLE_PRESS_MS opens.
+async function pressFile($, key, f, isStagedList) {
+  const now = await $.clock.now()
+  const isRepeat = lastPress.key === key && now - lastPress.at < DOUBLE_PRESS_MS
+  if (isRepeat && lastPress.opened) {
+    lastPress = { key: '', at: 0, opened: false } // the second click of a double click on an opened file
+    return
+  }
+  const isKeyboard = focused.key === key && now - focused.at >= FOCUS_SETTLE_MS
+  if (!isRepeat && !isKeyboard) {
+    lastPress = { key, at: now, opened: false }
+    return
+  }
+  lastPress = { key, at: now, opened: true }
+  await runAction($, 'Opening ' + f.path, () => openFile($, f, isStagedList))
+}
+
 // ---------- drawing helpers (no $) ----------
 
 function splitPath(p) {
@@ -519,6 +677,18 @@ export function register(on) {
     await refresh($)
     await $.ui.open({ id: PANE, title: 'Git', focus: true, closeOnEscape: true, columns: 56 })
     return {}
+  })
+
+  // Remember which file name holds the focus ring: Enter on it opens the file
+  on('ui.focus', async ($, e, next) => {
+    if (e.requestId === PANE) {
+      try {
+        focused = { key: e.element ?? '', at: await $.clock.now() }
+      } catch {
+        focused = { key: '', at: 0 }
+      }
+    }
+    return next(e)
   })
 
   on('ui.close', async ($, e, next) => {
@@ -765,6 +935,9 @@ export function register(on) {
       const kind = KIND[kindOf(code)]
       const [dir, base] = splitPath(f.path)
       const shown = f.orig && isStagedList ? splitPath(f.orig)[1] + ' → ' : ''
+      const openKey = (isStagedList ? 'sopen-' : 'uopen-') + f.path
+      const room = Math.max(8, cols - 16)
+      const name = shown + base
       return Box({
         key: (isStagedList ? 'srow-' : 'urow-') + f.path,
         flexDirection: 'row',
@@ -779,13 +952,17 @@ export function register(on) {
             flexGrow: 1,
             children: [
               Text({ color: kind.color, bold: true, children: [kind.glyph] }),
+              Button({
+                key: openKey,
+                label: name.length > room ? '…' + name.slice(-(room - 1)) : name,
+                plain: true,
+                hover: { color: kind.color, underline: true },
+                onPress: () => pressFile($, openKey, f, isStagedList),
+              }),
               Text({
+                dimColor: true,
                 wrap: 'truncate-start',
-                children: [
-                  Text({ dimColor: true, children: [narrow ? '' : dir] }),
-                  Text({ color: kind.color, children: [shown + base] }),
-                  ...(f.isUntracked && !narrow ? [Text({ dimColor: true, children: [' new'] })] : []),
-                ],
+                children: [(narrow ? '' : dir.replace(/\/$/, '')) + (f.isUntracked && !narrow ? ' new' : '')],
               }),
             ],
           }),
@@ -891,6 +1068,7 @@ export function register(on) {
           ),
         }),
       )
+      if (files.length) out.push(Text({ dimColor: true, wrap: 'wrap', children: ['Double-click a file, or Enter on it, to open it'] }))
     }
 
     return Box({ flexDirection: 'column', children: out })

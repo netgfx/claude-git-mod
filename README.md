@@ -24,6 +24,7 @@ To update later: `claude plugin marketplace update claude-git-mod`.
 
 - **Branch header**: shows the current branch. For a branch with a group, like `feature/login-form`, it also shows the group tag and the branch it came from (`↳ from develop`). Shows ahead/behind (`↑2 ↓0`) against the upstream.
 - **Staged / Changes lists**: `+` added (green), `~` modified (yellow), `-` deleted (red), `→` renamed (cyan), `!` conflict (magenta). Each file has a **Stage** or **Unstage** button. There are also **Stage all** and **Unstage all** buttons.
+- **Open a file**: double-click a file name in either list, or move to it with Tab / the arrows and press Enter. The file opens in the app your system uses for that file type (Windows: its file association; macOS: Launch Services; Linux: `xdg-mime`). If that app is VS Code (or VS Code Insiders, VSCodium, Cursor, Windsurf), Sublime Text or Notepad++, the file opens at its first changed line: the first hunk of `git diff` for the Changes list, `git diff --cached` for the Staged list. Deleted files can't be opened. A single click does nothing, so a click by mistake doesn't open anything.
 - **Commit (c)**: the model (`haiku`) writes a message from the staged diff and your recent commit style. You can then **Approve & commit (a)**, **Edit (e)**, **Regenerate (g)** or **Cancel (x)**. In edit mode, separate body lines with `|`.
 - **Pull (l)**: runs `git pull --ff-only` from the upstream and says how many commits came in. It never creates a merge commit or rebases; if the branches have diverged it stops and tells you, so you can choose `git pull --rebase` or `--no-rebase` yourself. Shows `↓N` when the branch is behind.
 - **Push (p)**: runs `git push`. If the branch has no upstream yet, it runs `git push -u origin <branch>`.
@@ -58,6 +59,7 @@ Push result:
 | `s` | Stash (including untracked files) |
 | `t` | Show / hide the stash list |
 | `r` | Refresh |
+| `Enter` / double-click | Open the file under the focus or pointer |
 | `Esc` | Close the panel |
 
 The panel refreshes every 3 s while it's open, after Claude's shell or edit tools run, and after each turn. Press `r` to refresh by hand.
@@ -89,7 +91,7 @@ To load it in the Desktop app, add the folder to `env.CLAUDE_CODE_PLUGIN_DIRS` i
 ## Notes
 - Mods run git with repository hooks turned off, so `pre-commit` and `commit-msg` hooks do **not** run on commits made from the panel.
 - Pull and push run with `GIT_TERMINAL_PROMPT=0`. If git needs credentials, they fail right away with a message instead of hanging. A credential manager or SSH agent still works.
-- `$` calls this mod makes: `$.process.run` (git only), `$.model.complete`, `$.ui.*`, `$.clock.every`, `$.command.register`.
+- `$` calls this mod makes: `$.process.run` (git; plus, when you open a file, `powershell` on Windows, `osascript`/`open` on macOS, `xdg-mime`/`xdg-open` on Linux), `$.clock.now`, `$.model.complete`, `$.ui.*`, `$.clock.every`, `$.command.register`.
 
 ## Repository layout
 ```
