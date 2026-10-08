@@ -60,7 +60,11 @@ Push result:
 | `s` | Stash (including untracked files) |
 | `t` | Show / hide the stash list |
 | `r` | Refresh |
-| `Enter` / double-click | Open the file under the focus or pointer |
+| `Tab` / arrows | Move between files and buttons |
+| `Enter` or double-click on a file name | Open the file (at its first change in VS Code and similar editors) |
+| `Enter` or click on **Stage** / **Unstage** | Stage or unstage that file |
+| `Enter` or click on **Discard**, then **Confirm discard** | Discard that file's changes, or delete it if it's new (**Keep** backs out) |
+| `Enter` or click on **Stage all** / **Unstage all** | Stage or unstage every file in that list |
 | `Esc` | Close the panel |
 
 The panel refreshes every 3 s while it's open, after Claude's shell or edit tools run, and after each turn. Press `r` to refresh by hand.
