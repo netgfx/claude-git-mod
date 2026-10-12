@@ -49,11 +49,11 @@ function fakeGit(calls: string[][], overrides: Record<string, any> = {}) {
   }
 }
 
-function baseStubs(on: any, calls: string[][], overrides: Record<string, any> = {}) {
+function baseStubs(on: any, calls: string[][], overrides: Record<string, any> = {}, logs: any[] = []) {
   on('process.run', fakeGit(calls, overrides))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', ($: any, e: any) => { logs.push(e); return { value: undefined } })
   on('ui.copy', () => ({ value: undefined }))
 }
 
@@ -401,13 +401,13 @@ const BRANCH_REFS = [
   '',
 ].join('\n')
 
-function branchStubs(on: any, calls: string[][], overrides: Record<string, any> = {}) {
+function branchStubs(on: any, calls: string[][], overrides: Record<string, any> = {}, logs: any[] = []) {
   baseStubs(on, calls, {
     'for-each-ref': (args: string[]) =>
       ({ value: { exitCode: 0, stdout: args.includes('--sort=-committerdate') ? BRANCH_REFS : 'develop\nmain\nfeature/login-form\n', stderr: '' } }),
     remote: () => ({ value: { exitCode: 0, stdout: 'origin\nteam/a\n', stderr: '' } }),
     ...overrides,
-  })
+  }, logs)
 }
 
 test('parses branches, skips remote HEAD and remotes that have a local branch', async () => {
@@ -454,6 +454,21 @@ test('Checkout (b) searches branches and Enter checks out the top match', async 
   expect(await ui.find({ key: 'branch-query' } as any)).toBeUndefined()
   // One branch listing per load, never one per keystroke
   expect(calls.filter((c) => c.slice(5)[0] === 'for-each-ref' && c.includes('--sort=-committerdate')).length).toBeLessThan(4)
+})
+
+// The ui.press hook then moves the ring onto the field with $.ui.focus; the
+// kit does not answer a mod's own focus moves, so that part is checked by hand
+test('Checkout draws a focused search field, and a second press closes it', async ($, on) => {
+  const calls: string[][] = []
+  branchStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'checkout' })
+  const field = await ui.find({ key: 'branch-query' } as any)
+  expect(field?.type).toBe('Input')
+  expect(field?.props.autoFocus).toBe(true)
+  await ui.press({ key: 'checkout' })
+  expect(await ui.find({ key: 'branch-query' } as any)).toBeUndefined()
 })
 
 test('pressing a remote branch checks it out with tracking', async ($, on) => {

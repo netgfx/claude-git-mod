@@ -665,6 +665,21 @@ function toggleBranchSearch($) {
   $.ui.invalidate('ui.render')
 }
 
+// Puts the cursor in the search field. The ring sits on the Checkout button
+// the person just pressed, so autoFocus alone would not move it. Called from
+// the ui.press hook: a render's $, kept by an onPress closure, can't move it.
+async function focusBranchQuery($) {
+  try {
+    const r = await $.ui.focus({ requestId: PANE, key: 'branch-query' })
+    if (!r?.deny) return
+    // The pane does not hold the keyboard (the press came from elsewhere): take it
+    await $.ui.open({ id: PANE, title: 'Git', focus: true, closeOnEscape: true, columns: 56 })
+    await $.ui.focus({ requestId: PANE, key: 'branch-query' })
+  } catch (err) {
+    $.ui.log('git-mod: could not focus the branch search: ' + (err?.message ?? err), { to: 'debug' })
+  }
+}
+
 // A local branch: `git checkout <name>`. A remote one: `git checkout --track`,
 // which makes the local branch and sets its upstream.
 export function checkoutArgs(b) {
@@ -861,6 +876,13 @@ export function register(on) {
       }
     }
     return next(e)
+  })
+
+  // Checkout (b) opened the branch search: put the cursor in its field
+  on('ui.press', async ($, e, next) => {
+    const result = await next(e)
+    if (e.requestId === PANE && e.element === 'checkout' && branchSearch) await focusBranchQuery($)
+    return result
   })
 
   on('ui.close', async ($, e, next) => {
