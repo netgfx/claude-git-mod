@@ -13,6 +13,7 @@ const BASE_BRANCHES = ['develop', 'dev', 'development', 'main', 'master']
 const WATCHED_TOOLS = ['Bash', 'PowerShell', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']
 const DOUBLE_PRESS_MS = 500 // two presses on one file within this open it
 const FOCUS_SETTLE_MS = 250 // a click moves the focus just before its press
+const MAX_MATCHES = 8 // branch search rows drawn at once
 
 // Editors that can open a file at a line. `scheme` opens `<scheme>://file/<path>:<line>:1`;
 // `args` builds the arguments for the editor's own executable.
@@ -66,6 +67,11 @@ let platform = '' // 'windows' | 'mac' | 'linux'
 const openers = new Map() // extension -> the default app's path or id ('' when none)
 let lastPress = { key: '', at: 0, opened: false } // the last press on a file name
 let focused = { key: '', at: 0 } // the pane element holding the focus ring
+let branches = [] // { name, ref, local, remote, when, order, key, full, base }, newest commit first
+let branchesError = ''
+let branchesLoading = null // the running load, so presses share it
+let branchSearch = null // { query } while the branch search is open
+let matchCache = { list: null, query: '', pool: [] } // the last query's matches, narrowed as it grows
 
 // ---------- git ----------
 
@@ -545,6 +551,138 @@ async function drop($, s) {
   setNotice($, 'ok', 'Removed "' + s.title + '" (' + hash.slice(0, 10) + '). To undo: git stash store ' + hash.slice(0, 10), hash)
 }
 
+// ---------- branch search ----------
+
+// Local and remote branches from `for-each-ref` lines (`<refname>\0<date>`), in
+// the order given. A remote branch with a local branch of the same name is left
+// out: checking out the local one is what's wanted. `remotes` picks the remote's
+// part of `refs/remotes/<remote>/<branch>` when a remote's name has a slash.
+export function parseBranches(out, remotes) {
+  const list = []
+  const locals = new Set()
+  const add = (name, ref, local, remote, when) => {
+    const full = name.toLowerCase()
+    const key = local.toLowerCase()
+    list.push({ name, ref, local, remote, when: when.trim(), order: list.length, key, full, base: key.slice(key.lastIndexOf('/') + 1) })
+  }
+  for (const line of out.split('\n')) {
+    const [ref = '', when = ''] = line.split('\0')
+    if (ref.startsWith('refs/heads/')) {
+      const name = ref.slice(11)
+      locals.add(name)
+      add(name, ref, name, '', when)
+    } else if (ref.startsWith('refs/remotes/')) {
+      const rest = ref.slice(13)
+      const remote = remotes.filter((r) => rest.startsWith(r + '/')).sort((a, b) => b.length - a.length)[0] ?? rest.split('/')[0]
+      const local = rest.slice(remote.length + 1)
+      if (local && local !== 'HEAD') add(rest, ref, local, remote, when)
+    }
+  }
+  return list.filter((b) => !b.remote || !locals.has(b.local))
+}
+
+// How well one lowercase token matches a branch; -1 when it doesn't. Whole
+// name, then the last part's start, the name's start, a word start, anywhere,
+// and last the token's letters in order (`flf` finds feature/login-form).
+function tokenScore(b, t) {
+  if (b.key === t || b.base === t) return 1000
+  if (b.base.startsWith(t)) return 800
+  if (b.key.startsWith(t)) return 700
+  const i = b.full.indexOf(t)
+  if (i >= 0) return i === 0 || '/-_.'.includes(b.full[i - 1]) ? 500 : 300 - Math.min(i, 100)
+  let j = 0
+  let gaps = 0
+  let last = -1
+  for (let k = 0; k < b.full.length && j < t.length; k++) {
+    if (b.full[k] !== t[j]) continue
+    if (last >= 0) gaps += k - last - 1
+    last = k
+    j++
+  }
+  return j === t.length ? Math.max(1, 100 - gaps) : -1
+}
+
+// The branches that match every word of the query, best first; ties go to
+// local branches, then to the newest commit. An empty query matches all.
+export function matchBranches(list, query) {
+  const tokens = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+  const scored = []
+  for (const b of list) {
+    let score = 0
+    for (const t of tokens) {
+      const s = tokenScore(b, t)
+      if (s < 0) {
+        score = -1
+        break
+      }
+      score += s
+    }
+    if (score >= 0) scored.push({ b, score })
+  }
+  scored.sort((x, y) => y.score - x.score || (x.b.remote ? 1 : 0) - (y.b.remote ? 1 : 0) || x.b.order - y.b.order)
+  return scored.map((x) => x.b)
+}
+
+// Matches for the open search, minus the branch already checked out. A query
+// that extends the last one only searches the last one's matches.
+function searchMatches() {
+  const query = (branchSearch?.query ?? '').trim().toLowerCase()
+  const isNarrowing = matchCache.list === branches && matchCache.query && query.startsWith(matchCache.query)
+  const pool = matchBranches(isNarrowing ? matchCache.pool : branches, query)
+  matchCache = { list: branches, query, pool }
+  return pool.filter((b) => b.remote || repo.isDetached || b.local !== repo.branch)
+}
+
+// One `for-each-ref` for every branch; typing then filters this list in memory
+async function fetchBranches($) {
+  const [refs, rem] = await Promise.all([
+    gitRoot($, ['for-each-ref', '--sort=-committerdate', '--format=%(refname)%00%(committerdate:relative)', 'refs/heads', 'refs/remotes']),
+    gitRoot($, ['remote']),
+  ])
+  if (!refs.ok) {
+    branchesError = lastLines(refs.err, 3) || 'Could not list the branches.'
+  } else {
+    branches = parseBranches(refs.out, rem.out.split('\n').map((s) => s.trim()).filter(Boolean))
+    branchesError = ''
+  }
+  if (branchSearch) $.ui.invalidate('ui.render')
+}
+
+function loadBranches($) {
+  if (!repo || repo.error) return Promise.resolve()
+  if (!branchesLoading) branchesLoading = fetchBranches($).finally(() => { branchesLoading = null })
+  return branchesLoading
+}
+
+function toggleBranchSearch($) {
+  if (branchSearch) {
+    branchSearch = null
+  } else {
+    branchSearch = { query: '' }
+    // Draw the list already held at once; the reload swaps in any new branches
+    loadBranches($).catch(() => {})
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// A local branch: `git checkout <name>`. A remote one: `git checkout --track`,
+// which makes the local branch and sets its upstream.
+export function checkoutArgs(b) {
+  return b.remote ? ['checkout', '--track', b.name, '--'] : ['checkout', b.name, '--']
+}
+
+async function checkoutBranch($, b) {
+  const r = await gitRoot($, checkoutArgs(b), { timeoutMs: 60000 })
+  if (!r.ok) {
+    setNotice($, 'error', 'Checkout of ' + b.name + ' failed:\n' + lastLines(r.err || r.out, 6))
+    return
+  }
+  branchSearch = null
+  setNotice($, 'ok', b.remote ? 'Checked out ' + b.local + ', tracking ' + b.name : 'Checked out ' + b.name)
+  // A remote branch now has a local one: list it as local next time
+  loadBranches($).catch(() => {})
+}
+
 // ---------- open a file ----------
 
 // The new-side line of the first hunk in `git diff -U0` output; 1 when there is none
@@ -695,6 +833,7 @@ export function register(on) {
       await refresh($)
       if (repo && !repo.error) {
         paneOpen = true
+        loadBranches($).catch(() => {}) // ready before the first search
         await $.ui.open({ id: PANE, title: 'Git', columns: 56 })
       }
     } catch (err) {
@@ -707,6 +846,7 @@ export function register(on) {
     paneOpen = true
     lastSig = ''
     await refresh($)
+    if (!branches.length) loadBranches($).catch(() => {})
     await $.ui.open({ id: PANE, title: 'Git', focus: true, closeOnEscape: true, columns: 56 })
     return {}
   })
@@ -850,10 +990,84 @@ export function register(on) {
             ...(repo.ahead && !repo.behind && !staged.length && !draft ? { variant: 'primary' } : {}),
             onPress: () => runAction($, 'Pushing', () => push($)),
           }),
+          Button({ key: 'checkout', label: (branchSearch ? '▾ ' : '') + 'Checkout (b)', hotkey: 'b', onPress: () => toggleBranchSearch($) }),
           Button({ key: 'refresh', label: 'Refresh (r)', hotkey: 'r', onPress: () => runAction($, 'Refreshing', async () => {}) }),
         ],
       }),
     )
+
+    // --- branch search ---
+    if (branchSearch) {
+      const bs = branchSearch
+      const matches = searchMatches()
+      const shown = matches.slice(0, MAX_MATCHES)
+      const checkout = (b) => runAction($, 'Checking out ' + b.name, () => checkoutBranch($, b))
+      const rows = shown.map((b, i) => {
+        const meta = (b.remote ? 'remote · ' : '') + b.when
+        const room = Math.max(8, cols - (narrow ? 8 : 8 + meta.length))
+        return Box({
+          key: 'brow-' + b.ref,
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Text({ color: 'cyan', children: [i === 0 && bs.query.trim() ? '↵' : ' '] }),
+            Button({
+              key: 'co-' + b.ref,
+              label: b.name.length > room ? '…' + b.name.slice(-(room - 1)) : b.name,
+              plain: true,
+              hover: { color: 'cyan', underline: true },
+              onPress: () => checkout(b),
+            }),
+            ...(narrow ? [] : [Text({ dimColor: true, wrap: 'truncate-end', children: [meta] })]),
+          ],
+        })
+      })
+      const status = branchesError
+        ? Text({ color: 'red', wrap: 'wrap', children: [branchesError] })
+        : !branches.length && branchesLoading
+          ? Text({ dimColor: true, children: ['Reading branches…'] })
+          : !matches.length
+            ? Text({ dimColor: true, children: [bs.query.trim() ? 'No branch matches "' + bs.query.trim() + '"' : 'No other branches'] })
+            : matches.length > shown.length
+              ? Text({ dimColor: true, children: ['+' + (matches.length - shown.length) + ' more · keep typing to narrow'] })
+              : null
+      out.push(
+        Box({
+          flexDirection: 'column',
+          borderStyle: 'round',
+          borderColor: 'cyan',
+          paddingX: 1,
+          marginTop: 1,
+          children: [
+            Input({
+              key: 'branch-query',
+              label: 'Branch ',
+              value: bs.query,
+              placeholder: 'Type to search ' + (branches.length || '') + ' branches',
+              submitLabel: 'checkout',
+              autoFocus: true,
+              onInput: (v) => { bs.query = v; redraw() },
+              onSubmit: (v) => {
+                bs.query = v
+                const best = searchMatches()[0]
+                if (best) checkout(best)
+                else setNotice($, 'info', 'No branch matches "' + v.trim() + '".')
+              },
+            }),
+            ...rows,
+            ...(status ? [status] : []),
+            Box({
+              flexDirection: 'row',
+              columnGap: 1,
+              children: [
+                Text({ dimColor: true, wrap: 'truncate-end', children: [narrow ? 'Enter: top match' : 'Enter checks out the top match · click any row'] }),
+                Button({ key: 'close-search', label: 'Close', plain: true, dimColor: true, onPress: () => toggleBranchSearch($) }),
+              ],
+            }),
+          ],
+        }),
+      )
+    }
 
     if (busy) out.push(Text({ color: 'yellow', children: ['… ' + busy] }))
 

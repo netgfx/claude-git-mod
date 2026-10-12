@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { parseStatus, parseStashes, parseMessage, cleanTitle, firstChangedLine, editorFor, editorUrl, discardCommands } from '../hooks/register.js'
+import { parseStatus, parseStashes, parseMessage, cleanTitle, firstChangedLine, editorFor, editorUrl, discardCommands, parseBranches, matchBranches, checkoutArgs } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'git-mod',
@@ -387,4 +387,107 @@ test('session start leaves the panel closed outside a repo', async ($, on) => {
   on('session.start', () => ({ cwd: 'C:\work' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\work' } as any)
   expect(opened.length).toBe(0)
+})
+
+// for-each-ref output for the branch search: newest commit first
+const BRANCH_REFS = [
+  'refs/heads/feature/login-form\x002 hours ago',
+  'refs/heads/main\x003 days ago',
+  'refs/remotes/origin/HEAD\x003 days ago',
+  'refs/remotes/origin/main\x003 days ago',
+  'refs/remotes/origin/fix/crash-on-start\x004 days ago',
+  'refs/remotes/team/a/release/2.0\x001 week ago',
+  'refs/heads/develop\x002 weeks ago',
+  '',
+].join('\n')
+
+function branchStubs(on: any, calls: string[][], overrides: Record<string, any> = {}) {
+  baseStubs(on, calls, {
+    'for-each-ref': (args: string[]) =>
+      ({ value: { exitCode: 0, stdout: args.includes('--sort=-committerdate') ? BRANCH_REFS : 'develop\nmain\nfeature/login-form\n', stderr: '' } }),
+    remote: () => ({ value: { exitCode: 0, stdout: 'origin\nteam/a\n', stderr: '' } }),
+    ...overrides,
+  })
+}
+
+test('parses branches, skips remote HEAD and remotes that have a local branch', async () => {
+  const list = parseBranches(BRANCH_REFS, ['origin', 'team/a'])
+  expect(list.map((b: any) => b.name)).toEqual(['feature/login-form', 'main', 'origin/fix/crash-on-start', 'team/a/release/2.0', 'develop'])
+  expect(list[2]).toMatchObject({ local: 'fix/crash-on-start', remote: 'origin', when: '4 days ago' })
+  expect(list[3]).toMatchObject({ local: 'release/2.0', remote: 'team/a' })
+  expect(checkoutArgs(list[0])).toEqual(['checkout', 'feature/login-form', '--'])
+  expect(checkoutArgs(list[2])).toEqual(['checkout', '--track', 'origin/fix/crash-on-start', '--'])
+})
+
+test('branch matching ranks name starts, words and letters in order', async () => {
+  const list = parseBranches(BRANCH_REFS, ['origin', 'team/a'])
+  const names = (q: string) => matchBranches(list, q).map((b: any) => b.name)
+  expect(names('')).toEqual(['feature/login-form', 'main', 'develop', 'origin/fix/crash-on-start', 'team/a/release/2.0'])
+  expect(names('dev')[0]).toBe('develop')
+  expect(names('login')[0]).toBe('feature/login-form')
+  expect(names('crash')).toEqual(['origin/fix/crash-on-start'])
+  expect(names('flf')).toEqual(['feature/login-form'])
+  expect(names('fix start')).toEqual(['origin/fix/crash-on-start'])
+  expect(names('zzz')).toEqual([])
+  // 5000 branches still match in well under a frame
+  const many = parseBranches(Array.from({ length: 5000 }, (_, i) => 'refs/heads/feature/task-' + i + '-thing\x00now').join('\n'), [])
+  const t0 = Date.now()
+  for (const q of ['f', 'fe', 'feat', 'task-49', 'task-499']) matchBranches(many, q)
+  expect(Date.now() - t0).toBeLessThan(200)
+  expect(matchBranches(many, 'task-4999')[0].name).toBe('feature/task-4999-thing')
+})
+
+test('Checkout (b) searches branches and Enter checks out the top match', async ($, on) => {
+  const calls: string[][] = []
+  branchStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'checkout' })
+  // The branch checked out now (feature/login-form) is not offered
+  expect(await ui.find({ key: 'co-refs/heads/main' } as any)).toBeDefined()
+  expect(await ui.find({ key: 'co-refs/heads/feature/login-form' } as any)).toBeUndefined()
+  await ui.input({ key: 'branch-query', text: 'dev', kind: 'change' })
+  expect(await ui.find({ key: 'co-refs/heads/main' } as any)).toBeUndefined()
+  await ui.input({ key: 'branch-query', text: 'dev' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'checkout develop --')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Checked out develop/ })).toBeDefined()
+  expect(await ui.find({ key: 'branch-query' } as any)).toBeUndefined()
+  // One branch listing per load, never one per keystroke
+  expect(calls.filter((c) => c.slice(5)[0] === 'for-each-ref' && c.includes('--sort=-committerdate')).length).toBeLessThan(4)
+})
+
+test('pressing a remote branch checks it out with tracking', async ($, on) => {
+  const calls: string[][] = []
+  branchStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'checkout' })
+  await ui.input({ key: 'branch-query', text: 'crash', kind: 'change' })
+  await ui.press({ key: 'co-refs/remotes/origin/fix/crash-on-start' })
+  expect(calls.some((c) => c.slice(5).join(' ') === 'checkout --track origin/fix/crash-on-start --')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Checked out fix\/crash-on-start, tracking origin\/fix\/crash-on-start/ })).toBeDefined()
+})
+
+test('a failed checkout shows the git error and keeps the search open', async ($, on) => {
+  const calls: string[][] = []
+  branchStubs(on, calls, {
+    checkout: () => ({ value: { exitCode: 1, stdout: '', stderr: 'error: Your local changes would be overwritten by checkout:\n\tsrc/app.ts\nAborting' } }),
+  })
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'checkout' })
+  await ui.input({ key: 'branch-query', text: 'main' })
+  expect(await ui.find({ type: 'Text', text: /Checkout of main failed/ })).toBeDefined()
+  expect(await ui.find({ key: 'branch-query' } as any)).toBeDefined()
+})
+
+test('no match: Enter checks nothing out', async ($, on) => {
+  const calls: string[][] = []
+  branchStubs(on, calls)
+  await $.command.run({ command: 'git', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as any)
+  await ui.press({ key: 'checkout' })
+  await ui.input({ key: 'branch-query', text: 'zzz' })
+  expect(calls.some((c) => c.slice(5)[0] === 'checkout')).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /No branch matches "zzz"/ })).toBeDefined()
 })
